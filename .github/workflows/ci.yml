@@ -9,4 +9,4 @@ jobs:
         with: {python-version: "3.12"}
       - run: pip install pytest
       - run: python -m pytest -q tests
-      - run: python -m compileall -q custom_components dtek_dnem
+      - run: python -m compileall -q dtek_dnem
