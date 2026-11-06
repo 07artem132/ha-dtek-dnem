@@ -39,6 +39,9 @@
     "binary_sensor": {
       "outage": {
         "name": "Power"
+      },
+      "emergency": {
+        "name": "Emergency outage"
       }
     },
     "sensor": {
@@ -50,6 +53,9 @@
       },
       "group": {
         "name": "Group"
+      },
+      "emergency_reason": {
+        "name": "Outage reason"
       }
     },
     "calendar": {

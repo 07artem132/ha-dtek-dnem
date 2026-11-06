@@ -8,7 +8,7 @@ from .entity import DtekEntity
 
 async def async_setup_entry(hass, entry, async_add_entities):
     c = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([NextOutageStart(c), NextOutageEnd(c), GroupSensor(c)])
+    async_add_entities([NextOutageStart(c), NextOutageEnd(c), GroupSensor(c), EmergencyReason(c)])
 
 
 class NextOutageStart(DtekEntity, SensorEntity):
@@ -35,6 +35,11 @@ class NextOutageEnd(DtekEntity, SensorEntity):
 
     @property
     def native_value(self):
+        # Аварійне відключення: беремо end_date порталу, якщо графік його не покриває.
+        if self.coordinator.emergency().get("active") and not self.coordinator.current():
+            end = self.coordinator.emergency_end()
+            if end:
+                return end
         it = self.coordinator.current() or self.coordinator.next_interval()
         return it["end"] if it else None
 
@@ -48,3 +53,20 @@ class GroupSensor(DtekEntity, SensorEntity):
     @property
     def native_value(self):
         return self.coordinator.data.get("group_name")
+
+
+class EmergencyReason(DtekEntity, SensorEntity):
+    _attr_translation_key = "emergency_reason"
+
+    def __init__(self, c) -> None:
+        super().__init__(c, "emergency_reason")
+
+    @property
+    def native_value(self):
+        return self.coordinator.emergency().get("reason")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        e = self.coordinator.emergency()
+        return {"active": e.get("active", False), "start": e.get("start"),
+                "end": e.get("end"), "type": e.get("type")}

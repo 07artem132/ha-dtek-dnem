@@ -7,7 +7,8 @@ from .entity import DtekEntity
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    async_add_entities([PowerOutage(hass.data[DOMAIN][entry.entry_id])])
+    c = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([PowerOutage(c), EmergencyOutage(c)])
 
 
 class PowerOutage(DtekEntity, BinarySensorEntity):
@@ -31,4 +32,24 @@ class PowerOutage(DtekEntity, BinarySensorEntity):
             "group": self.coordinator.data.get("group"),
             "possible_outage_now": bool(maybe and maybe["type"] == "possible"),
             "updated": self.coordinator.data.get("updated"),
+            "emergency": self.coordinator.emergency().get("active", False),
         }
+
+
+class EmergencyOutage(DtekEntity, BinarySensorEntity):
+    """ON = портал повідомляє про поточне аварійне/екстрене відключення."""
+
+    _attr_translation_key = "emergency"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "emergency")
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self.coordinator.emergency().get("active"))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        e = self.coordinator.emergency()
+        return {k: e.get(k) for k in ("reason", "start", "end", "type")}

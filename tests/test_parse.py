@@ -47,3 +47,17 @@ def test_build_schedule():
     assert r["status"] == "ok" and r["group_name"] == "Черга 3.1"
     assert list(r["days"]) == ["2026-11-06"]
     assert build_schedule(payload, "9")["status"] == "house_not_found"
+
+
+def test_emergency_parsed():
+    ts = int(DAY.timestamp())
+    payload = {
+        "data": {"1": {"sub_type_reason": ["GPV3.1"], "sub_type": "Аварійні ремонтні роботи",
+                       "start_date": "06.11.2026 10:15", "end_date": "06.11.2026 14:00", "type": "2"},
+                 "2": {"sub_type_reason": ["GPV3.1"]}},
+        "fact": {"today": ts, "data": {}},
+    }
+    e = build_schedule(payload, "1", now=DAY)["emergency"]
+    assert e["active"] and e["reason"] == "Аварійні ремонтні роботи"
+    assert e["start"].startswith("2026-11-06T10:15") and e["end"].startswith("2026-11-06T14:00")
+    assert build_schedule(payload, "2", now=DAY)["emergency"]["active"] is False

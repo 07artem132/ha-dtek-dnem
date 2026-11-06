@@ -50,6 +50,7 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
             update_interval=timedelta(minutes=SCAN_INTERVAL_MINUTES),
         )
         self.entry = entry
+        self._prev: dict | None = None
 
     async def _async_update_data(self) -> dict:
         d = self.entry.data
@@ -63,7 +64,28 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
         if data.get("status") != "ok":
             raise UpdateFailed(f"статус: {data.get('status')}")
         data["intervals"] = _intervals(data)
+        self._fire_events(data)
         return data
+
+    def _fire_events(self, data: dict) -> None:
+        """Події для автоматизацій. Перше завантаження лише запам'ятовується (без подій)."""
+        prev, self._prev = self._prev, data
+        if prev is None:
+            return
+        payload = {
+            "entry_id": self.entry.entry_id,
+            "group": data.get("group"),
+            "group_name": data.get("group_name"),
+        }
+        if prev.get("days") != data.get("days") or prev.get("updated") != data.get("updated"):
+            self.hass.bus.async_fire(
+                f"{DOMAIN}_schedule_updated",
+                {**payload, "updated": data.get("updated"), "days": data.get("days")},
+            )
+        e_new, e_old = data.get("emergency") or {}, prev.get("emergency") or {}
+        key = lambda e: (e.get("reason"), e.get("start_raw"))  # noqa: E731
+        if e_new.get("active") and key(e_new) != key(e_old):
+            self.hass.bus.async_fire(f"{DOMAIN}_emergency", {**payload, **e_new})
 
     # Похідні значення рахуємо від «зараз», тому вони не потребують нового запиту.
     def current(self, definite_only: bool = True) -> dict | None:
@@ -74,6 +96,13 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
             if it["start"] <= now < it["end"]:
                 return it
         return None
+
+    def emergency(self) -> dict:
+        return self.data.get("emergency") or {"active": False}
+
+    def emergency_end(self) -> datetime | None:
+        end = self.emergency().get("end")
+        return datetime.fromisoformat(end) if end else None
 
     def next_interval(self) -> dict | None:
         now = dt_util.now()
