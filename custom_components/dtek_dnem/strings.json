@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {"title": "Add-on ДТЕК", "description": "Адреса HTTP API add-on'а «DTEK Dnipro Outages» (host:8099).", "data": {"host": "URL add-on'а"}},
+      "city": {"title": "Місто", "data": {"city": "Місто"}},
+      "street": {"title": "Вулиця", "data": {"street": "Вулиця"}},
+      "house": {"title": "Будинок", "data": {"house": "Будинок"}}
+    },
+    "error": {
+      "cannot_connect": "Не вдалося підключитися до add-on'а",
+      "blocked": "Портал ДТЕК тимчасово не пускає add-on, спробуйте пізніше"
+    },
+    "abort": {"already_configured": "Ця адреса вже додана"}
+  },
+  "entity": {
+    "binary_sensor": {"outage": {"name": "Живлення"}},
+    "sensor": {
+      "next_outage_start": {"name": "Початок наступного відключення"},
+      "next_outage_end": {"name": "Кінець відключення"},
+      "group": {"name": "Черга"}
+    },
+    "calendar": {"schedule": {"name": "Графік відключень"}}
+  }
+}

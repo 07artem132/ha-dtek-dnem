@@ -1,0 +1,61 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "DTEK add-on",
+        "description": "HTTP API URL of the 'DTEK Dnipro Outages' add-on (host:8099).",
+        "data": {
+          "host": "Add-on URL"
+        }
+      },
+      "city": {
+        "title": "City",
+        "data": {
+          "city": "City"
+        }
+      },
+      "street": {
+        "title": "Street",
+        "data": {
+          "street": "Street"
+        }
+      },
+      "house": {
+        "title": "House",
+        "data": {
+          "house": "House"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the add-on",
+      "blocked": "The DTEK portal is temporarily blocking the add-on, try later"
+    },
+    "abort": {
+      "already_configured": "This address is already added"
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "outage": {
+        "name": "Power"
+      }
+    },
+    "sensor": {
+      "next_outage_start": {
+        "name": "Next outage start"
+      },
+      "next_outage_end": {
+        "name": "Outage end"
+      },
+      "group": {
+        "name": "Group"
+      }
+    },
+    "calendar": {
+      "schedule": {
+        "name": "Outage schedule"
+      }
+    }
+  }
+}
