@@ -55,6 +55,11 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
         self._last_ok: datetime | None = None
         self._failures = 0
 
+    @property
+    def stale_since(self) -> datetime | None:
+        """Час останнього успішного оновлення, якщо зараз показуємо застарілі дані."""
+        return self._last_ok if self._failures and self._last_ok else None
+
     def _retry_later(self) -> None:
         """Після помилки повторюємо запит із зростаючим інтервалом (2→5→10→15 хв), а не чекаємо 30 хв."""
         step = RETRY_STEPS_MIN[min(self._failures, len(RETRY_STEPS_MIN) - 1)]
@@ -67,11 +72,11 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
         except UpdateFailed as exc:
             self._retry_later()
             # Тимчасова помилка не повинна робити сутності unavailable: тримаємо останній графік до 6 год.
-            if self.data and self._last_ok and datetime.now() - self._last_ok < timedelta(hours=6):
+            if self.data and self._last_ok and dt_util.now() - self._last_ok < timedelta(hours=6):
                 _LOGGER.warning("Оновлення не вдалось (%s), лишаю попередні дані", exc)
                 return self.data
             raise
-        self._last_ok = datetime.now()
+        self._last_ok = dt_util.now()
         self._failures = 0
         self.update_interval = timedelta(minutes=SCAN_INTERVAL_MINUTES)
         return data
