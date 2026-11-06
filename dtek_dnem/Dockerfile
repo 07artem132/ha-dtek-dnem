@@ -1,11 +1,12 @@
-ARG BUILD_FROM
+ARG BUILD_FROM=ghcr.io/home-assistant/base:latest
 FROM $BUILD_FROM
 
-# Chromium + chromedriver з Alpine (працює на musl, amd64 та aarch64).
-RUN apk add --no-cache python3 py3-pip chromium chromium-chromedriver \
+# Усе з apk (musl-збірки), щоб не компілювати нічого на місці.
+# selenium ставимо у venv лише з готових wheel (--only-binary), aiohttp береться з системи.
+RUN apk add --no-cache python3 py3-pip py3-aiohttp chromium chromium-chromedriver \
     font-noto ttf-freefont \
- && python3 -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir aiohttp==3.10.* selenium==4.25.*
+ && python3 -m venv --system-site-packages /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir --only-binary=:all: "selenium>=4.25,<5"
 
 COPY app /app
 COPY run.sh /run.sh
