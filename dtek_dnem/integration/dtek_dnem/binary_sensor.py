@@ -44,6 +44,7 @@ class PowerOutage(DtekEntity, BinarySensorEntity):
         days = self.coordinator.data.get("days") or {}
         today = dt_util.now().date()
         return {
+            "stale_since": (self.coordinator.stale_since.strftime("%H:%M") if self.coordinator.stale_since else None),
             "today": _day_text(days, today),
             "tomorrow": _day_text(days, today + timedelta(days=1)),
             "group": self.coordinator.data.get("group"),

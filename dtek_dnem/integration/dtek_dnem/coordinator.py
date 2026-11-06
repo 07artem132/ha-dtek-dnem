@@ -15,6 +15,7 @@ from homeassistant.util import dt as dt_util
 from .const import CONF_CITY, CONF_HOST, CONF_HOUSE, CONF_STREET, DOMAIN, SCAN_INTERVAL_MINUTES
 
 _LOGGER = logging.getLogger(__name__)
+RETRY_STEPS_MIN = (2, 5, 10, 15)
 
 
 async def api_get(hass: HomeAssistant, host: str, path: str, **params: str) -> Any:
@@ -51,15 +52,43 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
         )
         self.entry = entry
         self._prev: dict | None = None
+        self._last_ok: datetime | None = None
+        self._failures = 0
+
+    @property
+    def stale_since(self) -> datetime | None:
+        """Час останнього успішного оновлення, якщо зараз показуємо застарілі дані."""
+        return self._last_ok if self._failures and self._last_ok else None
+
+    def _retry_later(self) -> None:
+        """Після помилки повторюємо запит із зростаючим інтервалом (2→5→10→15 хв), а не чекаємо 30 хв."""
+        step = RETRY_STEPS_MIN[min(self._failures, len(RETRY_STEPS_MIN) - 1)]
+        self._failures += 1
+        self.update_interval = timedelta(minutes=step)
 
     async def _async_update_data(self) -> dict:
+        try:
+            data = await self._fetch()
+        except UpdateFailed as exc:
+            self._retry_later()
+            # Тимчасова помилка не повинна робити сутності unavailable: тримаємо останній графік до 6 год.
+            if self.data and self._last_ok and dt_util.now() - self._last_ok < timedelta(hours=6):
+                _LOGGER.warning("Оновлення не вдалось (%s), лишаю попередні дані", exc)
+                return self.data
+            raise
+        self._last_ok = dt_util.now()
+        self._failures = 0
+        self.update_interval = timedelta(minutes=SCAN_INTERVAL_MINUTES)
+        return data
+
+    async def _fetch(self) -> dict:
         d = self.entry.data
         try:
             data = await api_get(
                 self.hass, d[CONF_HOST], "/api/schedule",
                 city=d[CONF_CITY], street=d[CONF_STREET], house=d[CONF_HOUSE],
             )
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, TimeoutError) as exc:
             raise UpdateFailed(f"add-on недоступний: {exc}") from exc
         if data.get("status") != "ok":
             raise UpdateFailed(f"статус: {data.get('status')}")
