@@ -54,8 +54,26 @@ class BlockedError(FetchError):
     """WAF / challenge не пропустив сторінку."""
 
 
-def build_form(method: str, fields: list[tuple[str, str]] | None = None) -> str:
-    form: dict[str, str] = {"method": method}
+_PAGE_SCHEDULE_JS = """
+// Графік (fact/preset) сторінка отримує у глобальній змінній; читаємо її як це робить сам фронтенд.
+const keys = Object.keys(window).filter(k => /discon/i.test(k));
+let src = null;
+for (const k of keys) {
+  const v = window[k];
+  if (v && typeof v === 'object' && (v.fact || v.preset)) { src = v; break; }
+}
+if (!src) return {keys: keys, fact: null, preset: null};
+const pick = o => { try { return JSON.parse(JSON.stringify(o)); } catch (e) { return null; } };
+return {keys: keys, fact: pick(src.fact), preset: pick(src.preset)};
+"""
+
+
+def build_form(
+    method: str,
+    fields: list[tuple[str, str]] | None = None,
+    extra: dict[str, str] | None = None,
+) -> str:
+    form: dict[str, str] = {"method": method, **(extra or {})}
     for i, (name, value) in enumerate(fields or []):
         form[f"data[{i}][name]"] = name
         form[f"data[{i}][value]"] = value
@@ -77,8 +95,11 @@ def _make_driver() -> webdriver.Chrome:
     return webdriver.Chrome(service=service, options=opts)
 
 
-def run_calls(calls: list[tuple[str, list[tuple[str, str]] | None]]) -> list[Any]:
-    """Відкриває браузер ОДИН раз і виконує послідовність AJAX-викликів."""
+def run_calls(
+    calls: list[tuple],
+    with_schedule: bool = False,
+) -> tuple[list[Any], dict | None]:
+    """Відкриває браузер ОДИН раз: AJAX-виклики (method, fields[, extra]) + опційно графік зі сторінки."""
     driver = _make_driver()
     try:
         driver.set_page_load_timeout(60)
@@ -100,10 +121,14 @@ def run_calls(calls: list[tuple[str, list[tuple[str, str]] | None]]) -> list[Any
             _LOGGER.warning("meta ajaxUrl не знайдено, використовую %s", FALLBACK_AJAX)
         ajax_url = urljoin(BASE_URL, (meta.get("ajax") or FALLBACK_AJAX).replace("\\/", "/"))
 
+        page_schedule = driver.execute_script(_PAGE_SCHEDULE_JS) if with_schedule else None
+
         results: list[Any] = []
-        for method, fields in calls:
+        for call in calls:
+            method, fields = call[0], call[1]
+            extra = call[2] if len(call) > 2 else None
             res = driver.execute_async_script(
-                _FETCH_JS, ajax_url, build_form(method, fields), meta.get("csrf")
+                _FETCH_JS, ajax_url, build_form(method, fields, extra), meta.get("csrf")
             )
             status = res.get("status")
             if status in (401, 403, 429) or (
@@ -116,6 +141,6 @@ def run_calls(calls: list[tuple[str, list[tuple[str, str]] | None]]) -> list[Any
                 results.append(json.loads(res["text"]))
             except json.JSONDecodeError as exc:
                 raise FetchError(f"{method}: не JSON") from exc
-        return results
+        return results, page_schedule
     finally:
         driver.quit()

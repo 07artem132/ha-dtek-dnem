@@ -25,7 +25,7 @@ _blocked_until = 0.0
 _backoff = BACKOFF_START
 
 
-async def _call(calls):
+async def _call(calls, with_schedule=False):
     global _blocked_until, _backoff
     if time.time() < _blocked_until:
         raise web.HTTPServiceUnavailable(
@@ -34,7 +34,7 @@ async def _call(calls):
     async with _lock:
         try:
             res = await asyncio.get_running_loop().run_in_executor(
-                None, fetcher.run_calls, calls
+                None, fetcher.run_calls, calls, with_schedule
             )
             _backoff = BACKOFF_START
             return res
@@ -58,7 +58,7 @@ async def _cached(key: str, ttl: int, factory):
 
 async def cities(_: web.Request) -> web.Response:
     async def f():
-        (raw,) = await _call([("getStreets", None)])
+        (raw,), _ = await _call([("getStreets", None)])
         return raw.get("streets") or raw.get("data") or {}
 
     streets = await _cached("streets", CATALOG_TTL, f)
@@ -75,10 +75,20 @@ async def streets(req: web.Request) -> web.Response:
 async def _home(city: str, street: str) -> dict:
     async def f():
         calls = [("getHomeNum", [("city", city), ("street", street)])]
-        (raw,) = await _call(calls)
+        (raw,), page = await _call(calls, with_schedule=True)
+        raw = dict(raw)
+        if page:
+            for k in ("fact", "preset"):
+                if page.get(k) and k not in raw:
+                    raw[k] = page[k]
         if "fact" not in raw and "preset" not in raw:
-            (extra,) = await _call([("checkDisconUpdate", None)])
-            raw = {**raw, **{k: extra[k] for k in ("fact", "preset") if k in extra}}
+            # Запасний шлях: той самий виклик, що робить фронтенд для оновлення графіка.
+            (extra,), _ = await _call(
+                [("checkDisconUpdate", None, {"update": "01.01.2000 00:00"})]
+            )
+            if isinstance(extra, dict):
+                raw.update({k: extra[k] for k in ("fact", "preset") if k in extra})
+        raw["_page_keys"] = (page or {}).get("keys")
         return raw
 
     return await _cached(f"home:{city}|{street}", MIN_POLL, f)
