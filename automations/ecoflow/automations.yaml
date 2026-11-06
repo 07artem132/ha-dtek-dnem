@@ -130,6 +130,12 @@
             {% if as_datetime(e.start) <= now() + timedelta(minutes=30) and as_datetime(e.end) > now() %}{% set ns.v = true %}{% endif %}
           {% endfor %}
           {{ ns.v or (dtek_reason != '' and state_attr(dtek_reason, 'kind') == 'scheduled') }}
+        planned_start: >-
+          {% set ns = namespace(s=none) %}
+          {% for e in evs %}
+            {% if ns.s is none and as_datetime(e.start) <= now() + timedelta(minutes=30) and as_datetime(e.end) > now() %}{% set ns.s = as_datetime(e.start) %}{% endif %}
+          {% endfor %}
+          {{ ns.s.isoformat() if ns.s is not none else '' }}
         emergency_reason: >-
           {{ state_attr(dtek_emerg, 'reason') if (dtek_emerg != '' and is_state(dtek_emerg, 'on')) else '' }}
         left_h: "{{ ((as_datetime(outage_end) - now()).total_seconds() / 3600) if outage_end else -1 }}"
@@ -145,7 +151,12 @@
           {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год {{ m % 60 }} хв{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
           {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
           {%- if trigger.platform == 'numeric_state' and trigger.entity_id == 'sensor.delta_2_max_ac_in_volts' -%}
-          ⚡ Світло зникло о {{ hm(now() - timedelta(minutes=1)) }}{{ ' (за графіком ДТЕК)' if planned_now else (' (поза графіком!)' if dtek_cal != '' else '') }}.
+          ⚡ Світло зникло о {{ hm(now() - timedelta(minutes=1)) }}{%- if planned_now and planned_start -%}
+          {%- set dm = ((now() - timedelta(minutes=1) - as_datetime(planned_start)).total_seconds() / 60) | round(0) | int -%}
+          {{ ' (за графіком ДТЕК з ' ~ hm(as_datetime(planned_start)) ~ (', на ' ~ dm ~ ' хв пізніше' if dm > 5 else (', на ' ~ (-dm) ~ ' хв раніше' if dm < -5 else '')) ~ ')' }}
+          {%- elif planned_now -%}{{ ' (за графіком ДТЕК)' }}
+          {%- elif dtek_cal != '' -%}{{ ' (поза графіком!)' }}
+          {%- endif -%}.
           {%- else -%}
           🪫 EcoFlow розряджається, світла досі нема.
           {%- endif %}
