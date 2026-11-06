@@ -334,27 +334,34 @@
           {% endfor %}
           {{ {'need_p': r.need, 'rows': r.rows} }}
         plan_text: |-
-          {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
+          {%- set wd = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'] -%}
           {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год{% if m % 60 %} {{ m % 60 }} хв{% endif %}{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
+          {%- set pct_h = full_wh / 100 / ([charge_set * charge_eff, 1] | max) -%}{#- год на 1% заряду при поточному налаштуванні -#}
           {%- if outages | count > 0 -%}
-          📊 Прогноз EcoFlow по графіку ДТЕК
-          (споживання за звичним профілем годин {{ prof | min | int }}–{{ prof | max | int }} W, заряджання {{ charge_set | int }} W):
-          {%- set st = namespace(t=now(), soc=soc | round(0) | int) -%}
+          📊 Прогноз EcoFlow (профіль {{ prof | min | int }}–{{ prof | max | int }} W, заряд {{ charge_set | int }} W)
+          {%- set st = namespace(t=now() | as_local, soc=soc | round(0) | int, day='') -%}
           {%- for row in plan.rows %}
           {%- set s = as_datetime(row[0]) | as_local -%}{%- set en = as_datetime(row[1]) | as_local -%}
           {%- if s > st.t + timedelta(minutes=5) %}
-          💡 {{ hm(st.t) }}–{{ s.strftime('%H:%M') }} світло ({{ dur((s - st.t).total_seconds() / 3600) }}): зарядиться {{ st.soc }}% → {{ row[2] }}%
+          {%- if st.t.strftime('%d.%m') != st.day %}{% set st.day = st.t.strftime('%d.%m') %}
+          {{ wd[st.t.weekday()] }} {{ st.day }}
           {%- endif %}
-          🔌 {{ hm(s) }}–{{ en.strftime('%H:%M') }} без світла ({{ dur((en - s).total_seconds() / 3600) }}):
-          {%- if row[4] %} {{ row[2] }}% → сяде о {{ (as_datetime(row[4]) | as_local).strftime('%H:%M') }} ⚠️ ще {{ dur((en - as_datetime(row[4])).total_seconds() / 3600) }} без живлення
-          {%- else %} {{ row[2] }}% → {{ row[3] }}% ✅
+          💡 {{ st.t.strftime('%H:%M') }}–{{ s.strftime('%H:%M') }} {{ st.soc }}→{{ row[2] }}%{% if row[2] >= max_lvl | int and row[2] > st.soc %} (о {{ (st.t + timedelta(hours=(row[2] - st.soc) * pct_h)).strftime('%H:%M') }}){% endif %}
           {%- endif %}
+          {%- if s.strftime('%d.%m') != st.day %}{% set st.day = s.strftime('%d.%m') %}
+          {{ wd[s.weekday()] }} {{ st.day }}
+          {%- endif %}
+          🔌 {{ s.strftime('%H:%M') }}–{{ en.strftime('%H:%M') }} {{ row[2] }}→{{ row[3] }}%
+          {%- if row[4] %} ⚠️ сяде о {{ (as_datetime(row[4]) | as_local).strftime('%H:%M') }}, ще {{ dur((en - as_datetime(row[4])).total_seconds() / 3600) }} без живлення
+          {%- else %} ✅{% endif %}
           {%- set st.t = en -%}{%- set st.soc = row[3] -%}
           {%- endfor %}
+          {%- set fa = st.t + timedelta(hours=([max_lvl | int - st.soc, 0] | max) * pct_h) %}
+          💡 з {{ st.t.strftime('%H:%M') }} світло: {{ st.soc }}→{{ max_lvl | int }}%{% if st.soc < max_lvl | int %} о {{ fa.strftime('%H:%M' if fa.date() == st.t.date() else '%d.%m %H:%M') }}{% endif %}; далі графіка ще нема
           {% if plan.need_p == 0 -%}
           ✅ На всі відключення вистачить.
           {%- elif plan.need_p > 0 -%}
-          👉 Щоб вистачило на всі, постав заряджання ≥ {{ plan.need_p }} W (зараз {{ charge_set | int }} W).
+          👉 Щоб вистачило на всі, постав заряд ≥ {{ plan.need_p }} W (зараз {{ charge_set | int }} W).
           {%- else -%}
           👉 Не вистачить навіть на {{ charge_max | int }} W: без світла треба менше навантаження.
           {%- endif -%}
