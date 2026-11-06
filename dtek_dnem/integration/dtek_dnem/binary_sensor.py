@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 
 from .const import DOMAIN
 from .entity import DtekEntity
+from homeassistant.util import dt as dt_util
+
+
+def _day_text(days: dict, day) -> list[str]:
+    """Інтервали доби у вигляді «HH:MM–HH:MM» (+ «?» для можливих)."""
+    out = []
+    for i in days.get(day.isoformat()) or []:
+        s = dt_util.as_local(dt_util.parse_datetime(i["start"]))
+        e = dt_util.as_local(dt_util.parse_datetime(i["end"]))
+        out.append(f"{s:%H:%M}–{e:%H:%M}" + (" ?" if i.get("type") == "possible" else ""))
+    return out
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -28,7 +41,11 @@ class PowerOutage(DtekEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict:
         maybe = self.coordinator.current(definite_only=False)
+        days = self.coordinator.data.get("days") or {}
+        today = dt_util.now().date()
         return {
+            "today": _day_text(days, today),
+            "tomorrow": _day_text(days, today + timedelta(days=1)),
             "group": self.coordinator.data.get("group"),
             "possible_outage_now": bool(maybe and maybe["type"] == "possible"),
             "updated": self.coordinator.data.get("updated"),
