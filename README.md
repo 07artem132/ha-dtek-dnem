@@ -9,14 +9,15 @@
    місто → вулиця → будинок, `binary_sensor` (є світло / немає), сенсори початку/кінця
    відключення, `calendar` з графіком.
 
-## Встановлення
+## Встановлення (без HACS)
 
-1. Add-on: *Settings → Add-ons → Add-on store → ⋮ → Repositories* → додай
+1. *Settings → Add-ons → Add-on store → ⋮ → Repositories* → додай
    `https://github.com/07artem132/ha-dtek-dnem`, встанови **DTEK Dnipro Outages**, запусти.
    Підтримуються `amd64` та `aarch64` (Pi 4/5). Chromium потребує ~300–500 МБ RAM на мить запиту.
-2. Інтеграція: HACS → Custom repositories → цей репо, категорія *Integration*, потім
-   *Add integration → ДТЕК Дніпро*. URL add-on'а: `http://homeassistant.local:8099`
-   (або hostname add-on'а зі сторінки його інформації).
+2. Add-on сам кладе інтеграцію в `/config/custom_components/dtek_dnem` (опція `install_integration`)
+   і пише в лог, що треба **перезапустити Home Assistant**. Після оновлення add-on'а інтеграція теж оновиться.
+3. Після перезапуску: *Add integration → ДТЕК Дніпро*. URL add-on'а: `http://<IP_HA>:8099`,
+   далі місто → вулиця → будинок.
 
 ## Принципи (свідомі обмеження)
 
