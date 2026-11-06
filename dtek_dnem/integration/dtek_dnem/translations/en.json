@@ -67,5 +67,18 @@
         "name": "Outage schedule"
       }
     }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Home Assistant restart required",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Home Assistant restart required",
+            "description": "The add-on updated the DTEK integration to version {version}. Restart Home Assistant to apply it."
+          }
+        }
+      }
+    }
   }
 }

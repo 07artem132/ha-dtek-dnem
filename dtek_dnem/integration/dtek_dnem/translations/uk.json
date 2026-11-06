@@ -67,5 +67,18 @@
         "name": "Графік відключень"
       }
     }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Потрібен перезапуск Home Assistant",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Потрібен перезапуск Home Assistant",
+            "description": "Add-on оновив інтеграцію ДТЕК до версії {version}. Перезапустіть Home Assistant, щоб застосувати зміни."
+          }
+        }
+      }
+    }
   }
 }
