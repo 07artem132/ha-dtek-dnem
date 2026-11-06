@@ -17,5 +17,19 @@ if bashio::config.true 'install_integration' && [ -d /homeassistant ]; then
   fi
 fi
 
+# Auto-discovery: повідомляємо Supervisor, щоб HA показав картку «Discovered» (як у Signal add-on).
+(
+  for _ in $(seq 1 60); do
+    curl -sf http://127.0.0.1:8099/health >/dev/null && break
+    sleep 2
+  done
+  CONFIG="$(jq -n --arg host "$(bashio::addon.hostname)" '{host: $host, port: 8099}')"
+  if bashio::discovery "dtek_dnem" "${CONFIG}" >/dev/null; then
+    bashio::log.info "Discovery для HA опубліковано."
+  else
+    bashio::log.warning "Не вдалося опублікувати discovery (додайте інтеграцію вручну: http://<IP_HA>:8099)."
+  fi
+) &
+
 cd /
 exec /opt/venv/bin/python -m app.server

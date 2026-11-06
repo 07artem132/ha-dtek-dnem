@@ -1,12 +1,17 @@
 {
   "domain": "dtek_dnem",
   "name": "ДТЕК Дніпро: графік відключень",
-  "codeowners": ["@07artem132"],
+  "codeowners": [
+    "@07artem132"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/07artem132/ha-dtek-dnem",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/07artem132/ha-dtek-dnem/issues",
   "requirements": [],
-  "version": "0.2.0"
+  "version": "0.2.1",
+  "after_dependencies": [
+    "hassio"
+  ]
 }
