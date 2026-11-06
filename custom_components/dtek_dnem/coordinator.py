@@ -84,8 +84,10 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
             )
         e_new, e_old = data.get("emergency") or {}, prev.get("emergency") or {}
         key = lambda e: (e.get("reason"), e.get("start_raw"))  # noqa: E731
-        if e_new.get("active") and key(e_new) != key(e_old):
-            self.hass.bus.async_fire(f"{DOMAIN}_emergency", {**payload, **e_new})
+        if e_new.get("outage_now") and key(e_new) != key(e_old):
+            self.hass.bus.async_fire(f"{DOMAIN}_outage_started", {**payload, **e_new})
+            if e_new.get("active"):
+                self.hass.bus.async_fire(f"{DOMAIN}_emergency", {**payload, **e_new})
 
     # Похідні значення рахуємо від «зараз», тому вони не потребують нового запиту.
     def current(self, definite_only: bool = True) -> dict | None:
@@ -95,10 +97,17 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
                 continue
             if it["start"] <= now < it["end"]:
                 return it
+        # Портал каже, що світла нема зараз (навіть якщо інтервалів графіка немає).
+        e = self.emergency()
+        if e.get("outage_now") and e.get("start"):
+            start = datetime.fromisoformat(e["start"])
+            end = datetime.fromisoformat(e["end"]) if e.get("end") else now + timedelta(hours=1)
+            if start <= now < end:
+                return {"start": start, "end": end, "type": "definite"}
         return None
 
     def emergency(self) -> dict:
-        return self.data.get("emergency") or {"active": False}
+        return self.data.get("emergency") or {"active": False, "outage_now": False}
 
     def emergency_end(self) -> datetime | None:
         end = self.emergency().get("end")

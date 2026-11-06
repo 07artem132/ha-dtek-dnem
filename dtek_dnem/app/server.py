@@ -95,6 +95,25 @@ async def schedule(req: web.Request) -> web.Response:
     return web.json_response(build_schedule(raw, q.get("house", "")))
 
 
+def _shape(v, depth=0):
+    """Структура відповіді без персональних значень (для діагностики формату порталу)."""
+    if isinstance(v, dict):
+        if depth >= 4:
+            return f"dict[{len(v)}]"
+        return {str(k): _shape(x, depth + 1) for k, x in list(v.items())[:6]}
+    if isinstance(v, list):
+        return [f"list[{len(v)}]"] + ([_shape(v[0], depth + 1)] if v else [])
+    return v if isinstance(v, (int, float, bool)) or v is None else str(v)[:40]
+
+
+async def debug(req: web.Request) -> web.Response:
+    q = req.query
+    raw = await _home(q.get("city", ""), q.get("street", ""))
+    data = raw.get("data")
+    house = data.get(q.get("house", "")) if isinstance(data, dict) else None
+    return web.json_response({"top_keys": list(raw), "house_entry": house, "shape": _shape(raw)})
+
+
 async def health(_: web.Request) -> web.Response:
     return web.json_response(
         {"ok": True, "blocked_for_s": max(0, int(_blocked_until - time.time()))}
@@ -114,6 +133,7 @@ def main() -> None:
             web.get("/api/streets", streets),
             web.get("/api/houses", houses),
             web.get("/api/schedule", schedule),
+            web.get("/api/debug", debug),
         ]
     )
     web.run_app(app, host="0.0.0.0", port=8099)
