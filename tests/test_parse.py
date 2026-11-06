@@ -61,3 +61,15 @@ def test_emergency_parsed():
     assert e["active"] and e["reason"] == "Аварійні ремонтні роботи"
     assert e["start"].startswith("2026-11-06T10:15") and e["end"].startswith("2026-11-06T14:00")
     assert build_schedule(payload, "2", now=DAY)["emergency"]["active"] is False
+
+
+def test_scheduled_vs_emergency_kind():
+    sched = {"sub_type": "Стабілізаційне відключення (Згідно графіку погодинних відключень)",
+             "start_date": "06:03 06.11.2026", "end_date": "10:00 06.11.2026"}
+    from app.parse import parse_emergency
+    e = parse_emergency(sched)
+    assert e["outage_now"] and e["kind"] == "scheduled" and not e["active"]
+    assert e["start"].startswith("2026-11-06T06:03") and e["end"].startswith("2026-11-06T10:00")
+    em = parse_emergency({"sub_type": "Аварійні ремонтні роботи", "start_date": "10:15 06.11.2026"})
+    assert em["kind"] == "emergency" and em["active"]
+    assert parse_emergency({})["outage_now"] is False

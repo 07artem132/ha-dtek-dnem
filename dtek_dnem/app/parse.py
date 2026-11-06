@@ -64,14 +64,26 @@ def _parse_dt(raw: Any) -> str | None:
     return None
 
 
+_SCHEDULED_MARKERS = ("стабілізац", "згідно графіку", "згідно з графіком", "гпв")
+
+
 def parse_emergency(entry: dict) -> dict[str, Any]:
-    """Поточне (не за графіком) відключення: причина, початок, очікуваний кінець."""
+    """Поточне відключення за адресою: причина, початок, очікуваний кінець.
+
+    outage_now: портал повідомляє, що світла зараз нема (за будь-якої причини).
+    kind: "scheduled" (стабілізаційне за графіком) або "emergency" (аварійне/екстрене/інше).
+    active: лише для kind == "emergency" (саме його очікує автоматизація аварій).
+    """
     reason = str(entry.get("sub_type") or "").strip()
     start_raw = str(entry.get("start_date") or "").strip()
     end_raw = str(entry.get("end_date") or "").strip()
-    active = bool(reason or start_raw)
+    outage_now = bool(reason or start_raw)
+    scheduled = any(m in reason.lower() for m in _SCHEDULED_MARKERS)
+    kind = None if not outage_now else ("scheduled" if scheduled else "emergency")
     return {
-        "active": active,
+        "outage_now": outage_now,
+        "kind": kind,
+        "active": kind == "emergency",
         "reason": reason or None,
         "start": _parse_dt(start_raw),
         "end": _parse_dt(end_raw),

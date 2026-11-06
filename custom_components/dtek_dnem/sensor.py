@@ -36,7 +36,7 @@ class NextOutageEnd(DtekEntity, SensorEntity):
     @property
     def native_value(self):
         # Аварійне відключення: беремо end_date порталу, якщо графік його не покриває.
-        if self.coordinator.emergency().get("active") and not self.coordinator.current():
+        if self.coordinator.emergency().get("outage_now") and not self.coordinator.current():
             end = self.coordinator.emergency_end()
             if end:
                 return end
@@ -68,5 +68,6 @@ class EmergencyReason(DtekEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict:
         e = self.coordinator.emergency()
-        return {"active": e.get("active", False), "start": e.get("start"),
+        return {"active": e.get("active", False), "outage_now": e.get("outage_now", False),
+                "kind": e.get("kind"), "start": e.get("start"),
                 "end": e.get("end"), "type": e.get("type")}
