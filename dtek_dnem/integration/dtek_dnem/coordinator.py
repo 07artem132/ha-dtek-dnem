@@ -51,8 +51,21 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
         )
         self.entry = entry
         self._prev: dict | None = None
+        self._last_ok: datetime | None = None
 
     async def _async_update_data(self) -> dict:
+        try:
+            data = await self._fetch()
+        except UpdateFailed as exc:
+            # Тимчасова помилка не повинна робити сутності unavailable: тримаємо останній графік до 6 год.
+            if self.data and self._last_ok and datetime.now() - self._last_ok < timedelta(hours=6):
+                _LOGGER.warning("Оновлення не вдалось (%s), лишаю попередні дані", exc)
+                return self.data
+            raise
+        self._last_ok = datetime.now()
+        return data
+
+    async def _fetch(self) -> dict:
         d = self.entry.data
         try:
             data = await api_get(

@@ -17,6 +17,7 @@ _LOGGER = logging.getLogger("dtek_dnem")
 
 MIN_POLL = int(os.environ.get("MIN_POLL_MINUTES", "30")) * 60
 CATALOG_TTL = 24 * 3600
+STALE_MAX = 12 * 3600
 BACKOFF_START, BACKOFF_MAX = 15 * 60, 6 * 3600
 
 _lock = asyncio.Lock()  # один браузер за раз (Pi має мало RAM)
@@ -51,7 +52,14 @@ async def _cached(key: str, ttl: int, factory):
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
-    value = await factory()
+    try:
+        value = await factory()
+    except web.HTTPException:
+        # Тимчасова помилка/блок порталу: краще віддати застарілі, але справжні дані (до 12 год).
+        if hit and time.time() - hit[0] < STALE_MAX:
+            _LOGGER.warning("%s: портал недоступний, віддаю кеш віком %d хв", key, (time.time() - hit[0]) // 60)
+            return hit[1]
+        raise
     _cache[key] = (time.time(), value)
     return value
 

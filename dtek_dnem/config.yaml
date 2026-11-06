@@ -1,5 +1,5 @@
 name: DTEK Dnipro Outages
-version: "0.2.3"
+version: "0.2.4"
 slug: dtek_dnem
 description: Графік відключень ДТЕК Дніпровські електромережі (читає портал справжнім Chromium, віддає JSON для інтеграції)
 url: https://github.com/07artem132/ha-dtek-dnem
