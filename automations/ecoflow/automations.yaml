@@ -1,0 +1,487 @@
+# Сповіщення про світло / EcoFlow Delta 2 Max / графік ДТЕК → Signal (група «Розумний дім», entity notify.rozumnii_dim через notify.send_message).
+# Деплой: deploy.ps1 (REST /api/config/automation/config/<id>).
+# Детект світла: напруга AC-входу EcoFlow (>180 V = мережа є, ~0-35 V = нема).
+# Прогноз рахуємо самі, НЕ з discharge_remaining_time EcoFlow (на історії він помилявся до +60%):
+#   енергія = (remain_mAh − резерв min_discharge) × напруга батареї;
+#   витрата поточного відключення: max(середнє за 10 хв, погодинний профіль input_text.ecoflow_profil_navantazhennia) × 1.10;
+#   майбутні відключення (план): профіль × 1.10
+#   (1.10 = втрати інвертора, відкалібровано на 3 відключеннях 3–6.11: реальна витрата 1.06–1.12 × total_out).
+# ДТЕК (інтеграція dtek_dnem) підхоплюється автоматично через integration_entities();
+# якщо її немає, повідомлення просто без графіка.
+# Стан «вже попередили, що не вистачить»: input_boolean.ecoflow_ne_vistachit_do_kintsia_vidkliuchennia.
+
+- id: ecoflow_outage_start
+  alias: "Світло: зникло (EcoFlow)"
+  description: "Мережа на вході EcoFlow зникла → Signal з прогнозом автономності до кінця відключення."
+  mode: single
+  triggers:
+    - trigger: numeric_state
+      entity_id: sensor.delta_2_max_ac_in_volts
+      below: 100
+      for: "00:01:00"
+  conditions:
+    - condition: template
+      value_template: "{{ trigger.from_state.state | is_number }}"
+    - condition: template
+      # дані EcoFlow валідні (не момент перепідключення хмари)
+      value_template: >-
+        {{ is_state('sensor.delta_2_max_status', 'online')
+           and 40 < states('sensor.delta_2_max_battery_volts') | float(0) < 60 }}
+  actions: &forecast_actions
+    - variables: &eco_vars
+        loss: 1.10
+        soc: "{{ states('sensor.delta_2_max_battery_level_soc') | float(0) }}"
+        # EcoFlow Cloud при перепідключенні на хвилину віддає unknown/0 (напр. battery_volts 0.003 V) —
+        # беремо значення лише якщо вони правдоподібні, інакше номінал
+        bat_v: "{% set v = states('sensor.delta_2_max_battery_volts') | float(0) %}{{ v if 40 < v < 60 else 53 }}"
+        full_mah: "{% set v = states('sensor.delta_2_max_main_full_capacity') | float(0) %}{{ v if v > 10000 else 39280 }}"
+        remain_mah: "{% set v = states('sensor.delta_2_max_main_remain_capacity') | float(-1) %}{{ v if v >= 0 else full_mah * soc / 100 }}"
+        min_lvl: "{{ states('number.delta_2_max_min_discharge_level') | float(5) }}"
+        max_lvl: "{% set v = states('number.delta_2_max_max_charge_level') | float(0) %}{{ v if v >= 50 else 100 }}"
+        out_w: "{{ states('sensor.delta_2_max_total_out_power') | float(0) }}"
+        in_w: "{{ states('sensor.delta_2_max_total_in_power') | float(0) }}"
+        load_w: "{{ states('sensor.ecoflow_navantazhennia_10_khv') | float(states('sensor.delta_2_max_total_out_power') | float(0)) }}"
+        full_wh: "{{ full_mah / 1000 * bat_v }}"
+        usable_wh: "{{ ([remain_mah - full_mah * min_lvl / 100, 0] | max) / 1000 * bat_v }}"
+        drain_w: "{{ load_w * loss }}"
+        # налаштування AC-заряду EcoFlow (200–2400 W, крок 100); реальний заряд ≈ 0.98 × налаштування (виміряно 789 W при 800)
+        charge_set: "{{ states('number.delta_2_max_ac_charging_power') | float(800) }}"
+        charge_max: "{{ state_attr('number.delta_2_max_ac_charging_power', 'max') | float(2400) }}"
+        charge_eff: 0.98
+        # середнє навантаження саме під час відключень (72 год), запасний варіант — середнє за добу
+        avg_out_w: >-
+          {{ states('sensor.ecoflow_serednie_navantazhennia_bez_svitla') | float(
+             states('sensor.ecoflow_navantazhennia_24_god') | float(load_w)) }}
+        # погодинний профіль навантаження (W по годинах 0..23, Київ): медіана годинних середніх за 30 днів,
+        # далі щогодини підтягується автоматизацією ecoflow_profile_update. Медіана, бо на історії
+        # відключень вона влучала в реальне споживання в межах ~5%, а середнє завищувало вечір (чайник тощо).
+        prof: >-
+          {% set p = states('input_text.ecoflow_profil_navantazhennia').split(',') | map('float', 0) | list %}
+          {{ p if p | count == 24 and p | min > 0 else [avg_out_w] * 24 }}
+        # скільки годин протягне: кожна година — більше з (поточне 10-хв навантаження, звичне для цієї години),
+        # тобто якщо щось увімкнули — вважаємо, що воно так і працюватиме; якщо зараз тихо — чекаємо звичного вечора
+        runtime_h: >-
+          {% set ns = namespace(e=usable_wh, t=now(), h=0.0, done=false) %}
+          {% for i in range(72) %}{% if not ns.done %}
+            {% set nxt = (ns.t + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0) %}
+            {% set sl = (nxt - ns.t).total_seconds() / 3600 %}
+            {% set w = [[load_w, prof[ns.t.hour]] | max * loss, 1] | max %}
+            {% if w * sl >= ns.e %}{% set ns.h = ns.h + ns.e / w %}{% set ns.done = true %}
+            {% else %}{% set ns.e = ns.e - w * sl %}{% set ns.h = ns.h + sl %}{% set ns.t = nxt %}{% endif %}
+          {% endif %}{% endfor %}
+          {{ ns.h if ns.done else 999 }}
+        dtek_cal: "{{ integration_entities('dtek_dnem') | select('match', 'calendar\\.') | first | default('') }}"
+        dtek_emerg: >-
+          {{ integration_entities('dtek_dnem') | select('match', 'binary_sensor\\.')
+             | select('is_state_attr', 'device_class', 'problem') | first | default('') }}
+        # сенсор «Причина відключення»: атрибути kind (scheduled|emergency), outage_now, start, end
+        dtek_reason: >-
+          {{ integration_entities('dtek_dnem') | select('match', 'sensor\\.')
+             | select('is_state_attr', 'outage_now', true) | first | default('') }}
+    - if: &if_cal
+        - condition: template
+          value_template: "{{ dtek_cal != '' }}"
+      then: &get_cal
+        - action: calendar.get_events
+          target:
+            entity_id: "{{ dtek_cal }}"
+          data:
+            duration:
+              hours: 48
+          response_variable: ev
+    - variables: &sched_vars
+        evs: >-
+          {% set e = ev[dtek_cal].events if (ev is defined and dtek_cal in ev) else [] %}
+          {{ e | selectattr('summary', 'eq', 'Відключення') | sort(attribute='start') | list }}
+        outage_end: >-
+          {% set ns = namespace(end=none) %}
+          {% for e in evs %}
+            {% set s = as_datetime(e.start) %}{% set en = as_datetime(e.end) %}
+            {% if ns.end is none and s <= now() + timedelta(minutes=30) and en > now() %}
+              {% set ns.end = en %}
+            {% elif ns.end is not none and s <= ns.end + timedelta(minutes=1) and en > ns.end %}
+              {% set ns.end = en %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.end is none and dtek_reason != '' and state_attr(dtek_reason, 'end') %}
+            {% set ns.end = as_datetime(state_attr(dtek_reason, 'end')) %}
+          {% elif ns.end is none and dtek_emerg != '' and is_state(dtek_emerg, 'on') and state_attr(dtek_emerg, 'end') %}
+            {% set ns.end = as_datetime(state_attr(dtek_emerg, 'end')) %}
+          {% endif %}
+          {{ ns.end.isoformat() if ns.end is not none else '' }}
+        next_start: >-
+          {% set ns = namespace(s=none) %}
+          {% for e in evs %}
+            {% if ns.s is none and as_datetime(e.start) > now() + timedelta(minutes=10) %}
+              {% set ns.s = as_datetime(e.start) %}
+            {% endif %}
+          {% endfor %}
+          {# запасний варіант: найближчий майбутній timestamp-сенсор інтеграції ДТЕК («Початок наступного відключення») #}
+          {% if ns.s is none %}
+            {% for e in integration_entities('dtek_dnem') | select('match', 'sensor\\.') | select('is_state_attr', 'device_class', 'timestamp') %}
+              {% set t = as_datetime(states(e)) | as_local if as_datetime(states(e)) else none %}
+              {% if t and t > now() + timedelta(minutes=10) and (ns.s is none or t < ns.s) %}{% set ns.s = t %}{% endif %}
+            {% endfor %}
+          {% endif %}
+          {{ ns.s.isoformat() if ns.s is not none else '' }}
+        planned_now: >-
+          {% set ns = namespace(v=false) %}
+          {% for e in evs %}
+            {% if as_datetime(e.start) <= now() + timedelta(minutes=30) and as_datetime(e.end) > now() %}{% set ns.v = true %}{% endif %}
+          {% endfor %}
+          {{ ns.v or (dtek_reason != '' and state_attr(dtek_reason, 'kind') == 'scheduled') }}
+        emergency_reason: >-
+          {{ state_attr(dtek_emerg, 'reason') if (dtek_emerg != '' and is_state(dtek_emerg, 'on')) else '' }}
+        left_h: "{{ ((as_datetime(outage_end) - now()).total_seconds() / 3600) if outage_end else -1 }}"
+        short: "{{ left_h > 0 and runtime_h < left_h }}"
+    - action: "input_boolean.turn_{{ 'on' if short else 'off' }}"
+      target:
+        entity_id: input_boolean.ecoflow_ne_vistachit_do_kintsia_vidkliuchennia
+    - action: notify.send_message
+      target:
+        entity_id: notify.rozumnii_dim
+      data:
+        message: |-
+          {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год {{ m % 60 }} хв{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
+          {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
+          {%- if trigger.platform == 'numeric_state' and trigger.entity_id == 'sensor.delta_2_max_ac_in_volts' -%}
+          ⚡ Світло зникло о {{ hm(now() - timedelta(minutes=1)) }}{{ ' (за графіком ДТЕК)' if planned_now else (' (поза графіком!)' if dtek_cal != '' else '') }}.
+          {%- else -%}
+          🪫 EcoFlow розряджається, світла досі нема.
+          {%- endif %}
+          {% if emergency_reason %}🚨 ДТЕК: {{ emergency_reason }}
+          {% endif -%}
+          🔋 EcoFlow {{ soc | round(0) | int }}% (≈{{ usable_wh | round(0) | int }} Wh до {{ min_lvl | int }}%), навантаження ≈{{ load_w | int }} W.
+          {% if drain_w > 5 -%}
+          ⏳ Вистачить на ≈{{ dur(runtime_h) }} (до {{ hm(now() + timedelta(hours=runtime_h)) }}).
+          {% if left_h > 0 -%}
+          📅 Світло за графіком о {{ hm(as_datetime(outage_end)) }} (через {{ dur(left_h) }}).
+          {% if not short -%}
+          ✅ Вистачить, запас ≈{{ dur(runtime_h - left_h) }}.
+          {%- else -%}
+          ⚠️ НЕ вистачить: бракує ≈{{ dur(left_h - runtime_h) }}. Щоб дотягнути, навантаження ≤ {{ (usable_wh / left_h / loss) | round(0) | int }} W.
+          {%- endif -%}
+          {%- else -%}
+          📅 Кінець відключення невідомий.
+          {%- endif -%}
+          {%- else -%}
+          ⏳ Навантаження майже нуль, заряд тримається.
+          {%- endif %}
+
+- id: ecoflow_outage_low_soc
+  alias: "Світло: EcoFlow сідає під час відключення"
+  description: "Під час відключення заряд упав нижче 30% / 15% → оновлений прогноз."
+  mode: single
+  triggers:
+    - trigger: numeric_state
+      entity_id: sensor.delta_2_max_battery_level_soc
+      below: 30
+    - trigger: numeric_state
+      entity_id: sensor.delta_2_max_battery_level_soc
+      below: 15
+  conditions:
+    - condition: numeric_state
+      entity_id: sensor.delta_2_max_ac_in_volts
+      below: 100
+  actions: *forecast_actions
+
+- id: ecoflow_outage_monitor
+  alias: "Світло: моніторинг заряду під час відключення"
+  description: "Кожні 2 хв під час відключення: прогноз перейшов «вистачить → не вистачить» (або назад) → Signal. Один раз на зміну, з гістерезисом."
+  mode: single
+  triggers:
+    - trigger: time_pattern
+      minutes: "/2"
+  conditions:
+    - condition: numeric_state
+      entity_id: sensor.delta_2_max_ac_in_volts
+      below: 100
+    - condition: template
+      # не дублюємо стартове повідомлення: моніторинг з 3-ї хвилини відключення
+      value_template: >-
+        {% set a = states.automation | selectattr('attributes.id', 'eq', 'ecoflow_outage_start') | first | default(none) %}
+        {{ a is not none and a.attributes.last_triggered is not none
+           and (now() - a.attributes.last_triggered).total_seconds() > 120 }}
+  actions:
+    - variables: *eco_vars
+    - if: *if_cal
+      then: *get_cal
+    - variables: *sched_vars
+    - variables:
+        warned: "{{ is_state('input_boolean.ecoflow_ne_vistachit_do_kintsia_vidkliuchennia', 'on') }}"
+        # гістерезис: «знову вистачає» лише із запасом ≥ 15 хв
+        recovered: "{{ left_h > 0 and runtime_h >= left_h + 0.25 }}"
+    - choose:
+        - conditions: "{{ short and not warned }}"
+          sequence:
+            - action: input_boolean.turn_on
+              target:
+                entity_id: input_boolean.ecoflow_ne_vistachit_do_kintsia_vidkliuchennia
+            - action: notify.send_message
+              target:
+                entity_id: notify.rozumnii_dim
+              data:
+                message: |-
+                  {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год {{ m % 60 }} хв{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
+                  {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
+                  ⚠️ EcoFlow вже НЕ вистачить до кінця відключення!
+                  🔋 {{ soc | round(0) | int }}%, навантаження зросло до ≈{{ load_w | int }} W (зараз {{ out_w | int }} W).
+                  ⏳ Вистачить на ≈{{ dur(runtime_h) }} (до {{ hm(now() + timedelta(hours=runtime_h)) }}), а світло о {{ hm(as_datetime(outage_end)) }}: бракує ≈{{ dur(left_h - runtime_h) }}.
+                  👉 Щоб дотягнути, навантаження ≤ {{ (usable_wh / left_h / loss) | round(0) | int }} W.
+        - conditions: "{{ warned and recovered }}"
+          sequence:
+            - action: input_boolean.turn_off
+              target:
+                entity_id: input_boolean.ecoflow_ne_vistachit_do_kintsia_vidkliuchennia
+            - action: notify.send_message
+              target:
+                entity_id: notify.rozumnii_dim
+              data:
+                message: |-
+                  {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год {{ m % 60 }} хв{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
+                  {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
+                  ✅ EcoFlow знову вистачає до кінця відключення.
+                  🔋 {{ soc | round(0) | int }}%, навантаження ≈{{ load_w | int }} W → вистачить до {{ hm(now() + timedelta(hours=runtime_h)) }}, світло о {{ hm(as_datetime(outage_end)) }} (запас ≈{{ dur(runtime_h - left_h) }}).
+
+- id: ecoflow_power_restored
+  alias: "Світло: з'явилось (EcoFlow)"
+  description: "Мережа повернулась → Signal: тривалість, швидкість заряду, чи встигне до наступного відключення."
+  mode: single
+  triggers:
+    - trigger: numeric_state
+      entity_id: sensor.delta_2_max_ac_in_volts
+      above: 180
+      for: "00:03:00"
+  conditions:
+    - condition: template
+      value_template: "{{ trigger.from_state.state | is_number }}"
+    - condition: template
+      # дані EcoFlow валідні (не момент перепідключення хмари)
+      value_template: >-
+        {{ is_state('sensor.delta_2_max_status', 'online')
+           and 40 < states('sensor.delta_2_max_battery_volts') | float(0) < 60 }}
+    - condition: template
+      # «світло є» лише після зафіксованого «світло зникло» (інакше це збій даних EcoFlow)
+      value_template: >-
+        {% set a = states.automation | selectattr('attributes.id', 'eq', 'ecoflow_outage_start') | first | default(none) %}
+        {% set t = a.attributes.last_triggered if a else none %}
+        {{ t is not none and (this.attributes.last_triggered is none or t > this.attributes.last_triggered) }}
+  actions:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.ecoflow_ne_vistachit_do_kintsia_vidkliuchennia
+    - variables: *eco_vars
+    - if: *if_cal
+      then: *get_cal
+    - variables: *sched_vars
+    - variables: &plan_vars
+        # майбутні відключення (злиті суміжні), [[start, end], ...]
+        outages: >-
+          {% set m = namespace(out=[], s=none, e=none) %}
+          {% for x in evs %}
+            {% set s = as_datetime(x.start) %}{% set e = as_datetime(x.end) %}
+            {% if e > now() %}
+              {% if m.s is none %}{% set m.s = s %}{% set m.e = e %}
+              {% elif s <= m.e + timedelta(minutes=1) %}{% set m.e = [m.e, e] | max %}
+              {% else %}{% set m.out = m.out + [[m.s.isoformat(), m.e.isoformat()]] %}{% set m.s = s %}{% set m.e = e %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if m.s is not none %}{% set m.out = m.out + [[m.s.isoformat(), m.e.isoformat()]] %}{% endif %}
+          {{ m.out }}
+        # симуляція: між відключеннями заряд P×eff до max_lvl, під час — витрата avg_out_w×loss до min_lvl.
+        # need_p: 0 = поточного заряду вистачає; N = мінімальне налаштування заряду, з яким вистачить на всі; -1 = не вистачить навіть на максимумі
+        plan: >-
+          {% set now_wh = remain_mah / 1000 * bat_v %}
+          {% set reserve = full_wh * min_lvl / 100 %}{% set cap = full_wh * max_lvl / 100 %}
+          {% set cands = [charge_set] + range(((charge_set / 100) | int + 1) * 100, (charge_max | int) + 1, 100) | list %}
+          {% set r = namespace(need=-1, rows=[]) %}
+          {% for P in cands %}
+            {% if r.need == -1 %}
+              {% set sim = namespace(e=now_wh, t=now(), fail=false, rows=[]) %}
+              {% for o in outages %}
+                {% set s = [as_datetime(o[0]), now()] | max %}{% set en = as_datetime(o[1]) %}
+                {% if s > sim.t %}{% set sim.e = [cap, sim.e + P * charge_eff * (s - sim.t).total_seconds() / 3600] | min %}{% endif %}
+                {% set e0 = sim.e %}
+                {% set d = namespace(e=e0, t=s, dies='') %}
+                {% for i in range(72) %}{% if d.t < en and d.dies == '' %}
+                  {% set nxt = [(d.t + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0), en] | min %}
+                  {% set w = prof[d.t.hour] * loss %}
+                  {% set use = w * (nxt - d.t).total_seconds() / 3600 %}
+                  {% if d.e - use < reserve %}
+                    {% set d.dies = (d.t + timedelta(hours=(d.e - reserve) / w)).isoformat() %}{% set d.e = reserve %}
+                  {% else %}{% set d.e = d.e - use %}{% set d.t = nxt %}{% endif %}
+                {% endif %}{% endfor %}
+                {% set dies = d.dies %}{% set sim.e = d.e %}
+                {% if dies %}{% set sim.fail = true %}{% endif %}
+                {% set sim.rows = sim.rows + [[s.isoformat(), en.isoformat(), (e0 / full_wh * 100) | round(0) | int, (sim.e / full_wh * 100) | round(0) | int, dies]] %}
+                {% set sim.t = en %}
+              {% endfor %}
+              {% if loop.first %}{% set r.rows = sim.rows %}{% endif %}
+              {% if not sim.fail %}{% set r.need = 0 if loop.first else (P | int) %}{% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ {'need_p': r.need, 'rows': r.rows} }}
+        plan_text: |-
+          {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
+          {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год{% if m % 60 %} {{ m % 60 }} хв{% endif %}{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
+          {%- if outages | count > 0 -%}
+          📊 Прогноз EcoFlow по графіку ДТЕК
+          (споживання за звичним профілем годин {{ prof | min | int }}–{{ prof | max | int }} W, заряджання {{ charge_set | int }} W):
+          {%- set st = namespace(t=now(), soc=soc | round(0) | int) -%}
+          {%- for row in plan.rows %}
+          {%- set s = as_datetime(row[0]) | as_local -%}{%- set en = as_datetime(row[1]) | as_local -%}
+          {%- if s > st.t + timedelta(minutes=5) %}
+          💡 {{ hm(st.t) }}–{{ s.strftime('%H:%M') }} світло ({{ dur((s - st.t).total_seconds() / 3600) }}): зарядиться {{ st.soc }}% → {{ row[2] }}%
+          {%- endif %}
+          🔌 {{ hm(s) }}–{{ en.strftime('%H:%M') }} без світла ({{ dur((en - s).total_seconds() / 3600) }}):
+          {%- if row[4] %} {{ row[2] }}% → сяде о {{ (as_datetime(row[4]) | as_local).strftime('%H:%M') }} ⚠️ ще {{ dur((en - as_datetime(row[4])).total_seconds() / 3600) }} без живлення
+          {%- else %} {{ row[2] }}% → {{ row[3] }}% ✅
+          {%- endif %}
+          {%- set st.t = en -%}{%- set st.soc = row[3] -%}
+          {%- endfor %}
+          {% if plan.need_p == 0 -%}
+          ✅ На всі відключення вистачить.
+          {%- elif plan.need_p > 0 -%}
+          👉 Щоб вистачило на всі, постав заряджання ≥ {{ plan.need_p }} W (зараз {{ charge_set | int }} W).
+          {%- else -%}
+          👉 Не вистачить навіть на {{ charge_max | int }} W: без світла треба менше навантаження.
+          {%- endif -%}
+          {%- endif -%}
+    - variables:
+        off_since: >-
+          {% set a = states.automation | selectattr('attributes.id', 'eq', 'ecoflow_outage_start') | first | default(none) %}
+          {% set t = a.attributes.last_triggered if a else none %}
+          {{ (t - timedelta(minutes=1)).isoformat() if t and (now() - t).total_seconds() < 172800 else '' }}
+    - action: notify.send_message
+      target:
+        entity_id: notify.rozumnii_dim
+      data:
+        message: |-
+          {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год {{ m % 60 }} хв{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
+          {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
+          {%- set on_at = now() - timedelta(minutes=3) -%}
+          💡 Світло є з {{ hm(on_at) }}{% if off_since %} (не було {{ dur((on_at - as_datetime(off_since)).total_seconds() / 3600) }}){% endif %}.
+          {% set need = [max_lvl - soc, 0] | max / 100 * full_wh -%}
+          {%- set charge_w = in_w - out_w -%}
+          🔋 EcoFlow {{ soc | round(0) | int }}%.
+          {%- if need < 20 %} Вже заряджена.
+          {%- elif charge_w > 20 -%}
+          {%- set ch = need / charge_w %} Заряд +{{ charge_w | int }} W → до {{ max_lvl | int }}% за ≈{{ dur(ch) }} (о {{ hm(now() + timedelta(hours=ch)) }}).
+          {%- else %} ⚠️ Не заряджається (вхід {{ in_w | int }} W, вихід {{ out_w | int }} W).
+          {%- endif %}
+          {% if next_start -%}
+          {%- set ns_ = as_datetime(next_start) -%}
+          {%- set until = (ns_ - now()).total_seconds() / 3600 -%}
+          📅 Наступне відключення о {{ hm(ns_) }},
+          {%- if need < 20 %} ✅ EcoFlow вже повна.
+          {%- elif charge_w > 20 and need / charge_w <= until %} ✅ встигне до {{ max_lvl | int }}% о {{ hm(now() + timedelta(hours=need / charge_w)) }}.
+          {%- elif charge_w > 20 %} ⚠️ не встигне: до {{ hm(ns_) }} буде ≈{{ [soc + charge_w * until / full_wh * 100, max_lvl] | min | round(0) | int }}% (100% було б о {{ hm(now() + timedelta(hours=need / charge_w)) }}).
+          {%- else %} ⚠️ не заряджається, лишиться {{ soc | round(0) | int }}%.
+          {%- endif -%}
+          {%- if need >= 20 and not (charge_w > 20 and need / charge_w <= until) and until > 0 -%}
+          {%- set req = ((need / until / charge_eff / 100) | round(0, 'ceil') * 100) | int %}
+          {% if req <= charge_max -%}
+          👉 Щоб встигнути до {{ max_lvl | int }}%, постав заряд ≥ {{ [req, 200] | max }} W (зараз {{ charge_set | int }} W).
+          {%- else -%}
+          👉 До {{ max_lvl | int }}% не встигне навіть на {{ charge_max | int }} W (буде ≈{{ [soc + charge_max * charge_eff * until / full_wh * 100, max_lvl] | min | round(0) | int }}%).
+          {%- endif -%}
+          {%- endif -%}
+          {%- else -%}
+          📅 Наступне відключення невідоме ({{ 'за графіком ДТЕК у найближчі 48 год його не видно' if dtek_cal != '' else 'графіка ДТЕК у HA ще нема' }}), тож чи встигне зарядитись, сказати не можу.
+          {%- endif %}
+          {% if plan_text and plan.need_p != 0 %}{{ plan_text }}{% endif %}
+
+- id: dtek_schedule_updated_signal
+  alias: "ДТЕК: новий графік → Signal"
+  description: "Подія dtek_dnem_schedule_updated → графік у Signal."
+  mode: queued
+  triggers:
+    - trigger: event
+      event_type: dtek_dnem_schedule_updated
+  actions:
+    - variables: *eco_vars
+    - if: *if_cal
+      then: *get_cal
+    - variables: *sched_vars
+    - variables: *plan_vars
+    - action: notify.send_message
+      target:
+        entity_id: notify.rozumnii_dim
+      data:
+        message: |-
+          {%- set wd = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'] -%}
+          📅 Новий графік ДТЕК{%- set g = trigger.event.data.group_name or trigger.event.data.group -%}{{ (' (' ~ g ~ ')' if 'черга' in (g | string | lower) else ' (черга ' ~ g ~ ')') if g else '' }}:
+          {%- for day, items in (trigger.event.data.days or {}) | dictsort %}
+          {%- set d = as_datetime(day ~ 'T00:00:00') -%}
+          {%- if d.date() >= now().date() %}
+          {%- set definite = items | selectattr('type', 'eq', 'definite') | list -%}
+          {%- set possible = items | selectattr('type', 'eq', 'possible') | list %}
+          {{ wd[d.weekday()] }} {{ d.strftime('%d.%m') }}:
+          {%- if definite %} {% for i in definite %}{{ (as_datetime(i.start) | as_local).strftime('%H:%M') }}–{{ (as_datetime(i.end) | as_local).strftime('%H:%M') | replace('00:00', '24:00') }}{{ ', ' if not loop.last }}{% endfor %}
+          {%- else %} без відключень
+          {%- endif %}
+          {%- if possible %} (можливі: {% for i in possible %}{{ (as_datetime(i.start) | as_local).strftime('%H:%M') }}–{{ (as_datetime(i.end) | as_local).strftime('%H:%M') | replace('00:00', '24:00') }}{{ ', ' if not loop.last }}{% endfor %})
+          {%- endif %}
+          {%- endif %}
+          {%- endfor %}
+          {% if plan_text %}
+          {{ plan_text }}{% endif %}
+
+- id: dtek_emergency_signal
+  alias: "ДТЕК: аварійне відключення → Signal"
+  description: "Подія dtek_dnem_emergency → Signal з причиною, часом і прогнозом EcoFlow."
+  mode: queued
+  triggers:
+    - trigger: event
+      event_type: dtek_dnem_emergency
+  actions:
+    - variables: *eco_vars
+    - action: notify.send_message
+      target:
+        entity_id: notify.rozumnii_dim
+      data:
+        message: |-
+          {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год {{ m % 60 }} хв{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
+          {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
+          {%- set d = trigger.event.data -%}
+          {%- set st = as_datetime(d.start) if d.start else none -%}
+          {%- set en = as_datetime(d.end) if d.end else none -%}
+          🚨 Аварійне відключення ДТЕК: {{ d.reason or 'причину не вказано' }}.
+          Початок: {{ hm(st) if st else (d.start_raw or 'невідомо') }}, орієнтовно до: {{ hm(en) if en else (d.end_raw or 'невідомо') }}.
+          🔋 EcoFlow {{ soc | round(0) | int }}%, навантаження ≈{{ load_w | int }} W
+          {%- if drain_w > 5 %} → вистачить на ≈{{ dur(runtime_h) }}.
+          {%- if en and en > now() -%}
+          {%- set left = (en - now()).total_seconds() / 3600 %}
+          {{ '✅ До ' ~ hm(en) ~ ' вистачить.' if runtime_h >= left else '⚠️ До ' ~ hm(en) ~ ' НЕ вистачить, бракує ≈' ~ dur(left - runtime_h) ~ '.' }}
+          {%- endif -%}
+          {%- else %}.
+          {%- endif %}
+
+- id: ecoflow_profile_update
+  alias: "EcoFlow: оновити профіль навантаження по годинах"
+  description: "Щогодини: година, що минула, = 0.9 × стара + 0.1 × середнє за цю годину (обрізане до ±50%, щоб чайник не псував профіль)."
+  mode: single
+  triggers:
+    - trigger: time_pattern
+      minutes: 0
+      seconds: 30
+  conditions:
+    - condition: template
+      value_template: "{{ states('sensor.komora_delta_2_max_ecoflow_navantazhennia_1_god') | is_number }}"
+  actions:
+    - variables:
+        h: "{{ (now() - timedelta(minutes=5)).hour }}"
+        p: "{{ states('input_text.ecoflow_profil_navantazhennia').split(',') | map('float', 0) | list }}"
+        x: "{{ states('sensor.komora_delta_2_max_ecoflow_navantazhennia_1_god') | float(0) }}"
+    - condition: template
+      value_template: "{{ p | count == 24 and p[h] > 0 }}"
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.ecoflow_profil_navantazhennia
+      data:
+        value: >-
+          {% set old = p[h] %}{% set xc = [[x, old * 0.5] | max, old * 1.5] | min %}
+          {% set ns = namespace(out=[]) %}
+          {% for v in p %}{% set ns.out = ns.out + [((0.9 * old + 0.1 * xc) if loop.index0 == h else v) | round(0) | int] %}{% endfor %}
+          {{ ns.out | join(',') }}
