@@ -25,6 +25,10 @@
         "data": {
           "house": "Будинок"
         }
+      },
+      "hassio_confirm": {
+        "title": "DTEK Dnipro Outages",
+        "description": "Знайдено add-on «DTEK Dnipro Outages». Додати інтеграцію та вибрати адресу?"
       }
     },
     "error": {

@@ -1,5 +1,5 @@
 name: DTEK Dnipro Outages
-version: "0.2.0"
+version: "0.2.2"
 slug: dtek_dnem
 description: Графік відключень ДТЕК Дніпровські електромережі (читає портал справжнім Chromium, віддає JSON для інтеграції)
 url: https://github.com/07artem132/ha-dtek-dnem
@@ -13,6 +13,9 @@ ports:
   8099/tcp: 8099
 ports_description:
   8099/tcp: HTTP API для інтеграції dtek_dnem
+discovery:
+  - dtek_dnem
+homeassistant_api: true
 map:
   - type: homeassistant_config
     read_only: false
