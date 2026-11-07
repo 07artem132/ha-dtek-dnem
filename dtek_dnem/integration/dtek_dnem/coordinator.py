@@ -8,7 +8,9 @@ from typing import Any
 
 import aiohttp
 from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -54,6 +56,45 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
         self._prev: dict | None = None
         self._last_ok: datetime | None = None
         self._failures = 0
+        self._boundary_unsub: CALLBACK_TYPE | None = None
+
+    @callback
+    def schedule_boundary(self) -> None:
+        """Станом на межах інтервалів (початок/кінець відключення, північ) перераховуємо сутності.
+
+        Дані з порталу оновлюються раз на 30 хв, а стан «зараз» залежить від часу, тому без цього
+        сутності й картка запізнюються на десятки хвилин після кінця/початку вікна."""
+        if self._boundary_unsub:
+            self._boundary_unsub()
+            self._boundary_unsub = None
+        if not self.data:
+            return
+        now = dt_util.now()
+        points = []
+        for it in self.data.get("intervals") or []:
+            points += [it["start"], it["end"]]
+        e = self.emergency()
+        for k in ("start", "end"):
+            if e.get(k):
+                points.append(datetime.fromisoformat(e[k]))
+        points.append((now + timedelta(days=1)).replace(hour=0, minute=0, second=1, microsecond=0))
+        nxt = min((p for p in points if p > now), default=None)
+        if nxt is None:
+            return
+
+        @callback
+        def _fire(_when) -> None:
+            self._boundary_unsub = None
+            self.async_update_listeners()
+            self.schedule_boundary()
+
+        self._boundary_unsub = async_track_point_in_time(self.hass, _fire, nxt + timedelta(seconds=1))
+
+    async def async_shutdown(self) -> None:
+        if self._boundary_unsub:
+            self._boundary_unsub()
+            self._boundary_unsub = None
+        await super().async_shutdown()
 
     @property
     def stale_since(self) -> datetime | None:
@@ -74,11 +115,14 @@ class DtekCoordinator(DataUpdateCoordinator[dict]):
             # Тимчасова помилка не повинна робити сутності unavailable: тримаємо останній графік до 6 год.
             if self.data and self._last_ok and dt_util.now() - self._last_ok < timedelta(hours=6):
                 _LOGGER.warning("Оновлення не вдалось (%s), лишаю попередні дані", exc)
+                self.schedule_boundary()
                 return self.data
             raise
         self._last_ok = dt_util.now()
         self._failures = 0
         self.update_interval = timedelta(minutes=SCAN_INTERVAL_MINUTES)
+        self.data = data
+        self.schedule_boundary()
         return data
 
     async def _fetch(self) -> dict:
