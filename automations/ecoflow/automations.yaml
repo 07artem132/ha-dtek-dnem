@@ -382,22 +382,21 @@
           💡 Світло є з {{ hm(on_at) }}{% if off_since %} (не було {{ dur((on_at - as_datetime(off_since)).total_seconds() / 3600) }}){% endif %}.
           {% set need = [max_lvl - soc, 0] | max / 100 * full_wh -%}
           {%- set charge_w = in_w - out_w -%}
-          🔋 EcoFlow {{ soc | round(0) | int }}%.
-          {%- if need < 20 %} Вже заряджена.
+          🔋 EcoFlow {{ soc | round(0) | int }}%
+          {%- if need < 20 %}, вже заряджена.
           {%- elif charge_w > 20 -%}
-          {%- set ch = need / charge_w %} Заряд +{{ charge_w | int }} W → до {{ max_lvl | int }}% за ≈{{ dur(ch) }} (о {{ hm(now() + timedelta(hours=ch)) }}).
-          {%- else %} ⚠️ Не заряджається (вхід {{ in_w | int }} W, вихід {{ out_w | int }} W).
+          {%- set ch = need / charge_w %} → {{ max_lvl | int }}% о {{ hm(now() + timedelta(hours=ch)) }} (+{{ charge_w | int }} W, ≈{{ dur(ch) }}).
+          {%- else %}, ⚠️ не заряджається (вхід {{ in_w | int }} W, вихід {{ out_w | int }} W).
           {%- endif %}
           {% if next_start -%}
           {%- set ns_ = as_datetime(next_start) -%}
           {%- set until = (ns_ - now()).total_seconds() / 3600 -%}
-          📅 Наступне відключення о {{ hm(ns_) }},
-          {%- if need < 20 %} ✅ EcoFlow вже повна.
-          {%- elif charge_w > 20 and need / charge_w <= until %} ✅ встигне до {{ max_lvl | int }}% о {{ hm(now() + timedelta(hours=need / charge_w)) }}.
-          {%- elif charge_w > 20 %} ⚠️ не встигне: до {{ hm(ns_) }} буде ≈{{ [soc + charge_w * until / full_wh * 100, max_lvl] | min | round(0) | int }}% (100% було б о {{ hm(now() + timedelta(hours=need / charge_w)) }}).
-          {%- else %} ⚠️ не заряджається, лишиться {{ soc | round(0) | int }}%.
+          📅 Наступне відключення о {{ hm(ns_) }}
+          {%- if need < 20 or (charge_w > 20 and need / charge_w <= until) %}: ✅ встигне.
+          {%- elif charge_w > 20 %}: ⚠️ не встигне, буде ≈{{ [soc + charge_w * until / full_wh * 100, max_lvl] | min | round(0) | int }}%.
+          {%- else %}: ⚠️ лишиться {{ soc | round(0) | int }}%.
           {%- endif -%}
-          {%- if need >= 20 and not (charge_w > 20 and need / charge_w <= until) and until > 0 -%}
+          {%- if need >= 20 and charge_w > 20 and need / charge_w > until and until > 0 -%}
           {%- set req = ((need / until / charge_eff / 100) | round(0, 'ceil') * 100) | int %}
           {% if req <= charge_max -%}
           👉 Щоб встигнути до {{ max_lvl | int }}%, постав заряд ≥ {{ [req, 200] | max }} W (зараз {{ charge_set | int }} W).
