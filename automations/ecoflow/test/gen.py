@@ -26,7 +26,7 @@ def scen(name,msg,ov=None,evv=None,extra=None,trig=None):
         seq.append([k, None if (ov and k in ov) else (v if isinstance(v,str) else str(v)), lit(ov[k]) if (ov and k in ov) else None])
     pre="{% set ev = "+json.dumps(evv,ensure_ascii=False)+" %}" if evv else ""
     if evv or (ov and 'dtek_cal' in ov):
-        for k,v in sched.items(): seq.append([k,v,None])
+        for k,v in sched.items(): seq.append([k, None if (ov and k in ov) else v, lit(ov[k]) if (ov and k in ov) else None])
         if msg in (mr, mse):
             for k,v in planv.items(): seq.append([k,v,None])
     for k,v in (extra or {}).items(): seq.append([k,v if isinstance(v,str) else None, None if isinstance(v,str) else lit(v)])
@@ -34,6 +34,7 @@ def scen(name,msg,ov=None,evv=None,extra=None,trig=None):
 TV="{% set trigger = {'platform':'numeric_state','entity_id':'sensor.delta_2_max_ac_in_volts'} %}"
 ms=msgs('ecoflow_outage_start')[0]; mse=msgs('dtek_schedule_updated_signal')[0]; mon=msgs('ecoflow_outage_monitor'); mr=msgs('ecoflow_power_restored')[0]; me=msgs('dtek_emergency_signal')[0]
 cal={'dtek_cal':'calendar.x','dtek_emerg':''}
+def evl(*xs): return {'calendar.x':{'events':[{'start':iso(a),'end':iso(b),'summary':'Відключення'} for a,b in xs]}}
 S=[
  scen('LIVE start, no dtek', ms, {'dtek_cal':'','dtek_emerg':''}, trig=TV),
  scen('start planned, end in 2h', ms, cal, ev(120,400), trig=TV),
@@ -48,6 +49,15 @@ S=[
    {'start':iso(120),'end':iso(360),'summary':'Відключення'},{'start':iso(480),'end':iso(720),'summary':'Відключення'}]}}, extra={'off_since':iso(-180)}),
  scen('restored next not in time', mr, {**cal,'soc':20.0,'remain_mah':7900.0,'in_w':900.0,'out_w':120.0,'charge_set':800.0,'avg_out_w':150.0}, {'calendar.x':{'events':[
    {'start':iso(60),'end':iso(240),'summary':'Відключення'}]}}, extra={'off_since':''}),
+ # 13.11: світло дали о 20:02 у слоті 16:30–20:30, наступного графіка нема → не «наступне о 20:30», а «раніше графіка»
+ scen('restored EARLY in slot, no next', mr, {**cal,'soc':60.0,'in_w':890.0,'out_w':120.0}, evl((-213,25)), extra={'off_since':iso(-213)}),
+ scen('restored EARLY, slot split in 2 events + next', mr, {**cal,'soc':60.0,'in_w':890.0,'out_w':120.0}, evl((-213,-60),(-60,25),(300,420)), extra={'off_since':iso(-213)}),
+ scen('restored BEFORE slot start', mr, {**cal,'soc':70.0,'in_w':890.0,'out_w':120.0}, evl((10,250)), extra={'off_since':iso(-60)}),
+ scen('restored AT slot end', mr, {**cal,'soc':55.0,'in_w':890.0,'out_w':120.0}, evl((-240,-3),(400,520)), extra={'off_since':iso(-243)}),
+ scen('restored LATE after slot', mr, {**cal,'soc':50.0,'in_w':890.0,'out_w':120.0}, evl((-240,-40),(400,520)), extra={'off_since':iso(-245)}),
+ scen('start AGAIN inside same slot', ms, cal, evl((-2880,60)), trig=TV),
+ scen('schedule, grid ON inside slot', mse, {**cal,'avg_out_w':300.0,'grid_on':True}, evl((-60,120),(300,420)), trig="{% set trigger = {'event':{'data':{'group':'2.2','group_name':'Черга 2.2','days':{}}}} %}"),
+ scen('schedule, grid OFF inside slot', mse, {**cal,'avg_out_w':300.0,'grid_on':False}, evl((-60,120),(300,420)), trig="{% set trigger = {'event':{'data':{'group':'2.2','group_name':'Черга 2.2','days':{}}}} %}"),
  scen('schedule+plan', mse, {**cal,'avg_out_w':300.0}, ev(-5,200), trig="{% set trigger = {'event':{'data':{'group':'3.1','group_name':'3.1','days':{}}}} %}"),
  scen('emergency', me, None, trig="{% set trigger = {'event':{'data':{'reason':'Аварійні ремонтні роботи','start':'"+iso(-5)+"','end':'"+iso(240)+"','start_raw':'x','end_raw':'y'}}} %}"),
 ]
