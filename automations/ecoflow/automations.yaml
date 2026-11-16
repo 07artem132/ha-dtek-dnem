@@ -86,8 +86,10 @@
           target:
             entity_id: "{{ dtek_cal }}"
           data:
+            # з 12 год тому: щоб бачити слот, який уже йде або щойно скінчився (зсув «раніше/пізніше графіка»)
+            start_date_time: "{{ (now() - timedelta(hours=12)).isoformat() }}"
             duration:
-              hours: 48
+              hours: 60
           response_variable: ev
     - variables: &sched_vars
         evs: >-
@@ -109,20 +111,27 @@
             {% set ns.end = as_datetime(state_attr(dtek_emerg, 'end')) %}
           {% endif %}
           {{ ns.end.isoformat() if ns.end is not none else '' }}
-        next_start: >-
-          {% set ns = namespace(s=none) %}
-          {% for e in evs %}
-            {% if ns.s is none and as_datetime(e.start) > now() + timedelta(minutes=10) %}
-              {% set ns.s = as_datetime(e.start) %}
+        # злиті суміжні відключення (у т.ч. через північ), [[start, end], ...], включно з тими, що вже скінчились
+        chains: >-
+          {% set m = namespace(out=[], s=none, e=none) %}
+          {% for x in evs %}
+            {% set s = as_datetime(x.start) %}{% set e = as_datetime(x.end) %}
+            {% if m.s is none %}{% set m.s = s %}{% set m.e = e %}
+            {% elif s <= m.e + timedelta(minutes=1) %}{% set m.e = [m.e, e] | max %}
+            {% else %}{% set m.out = m.out + [[m.s.isoformat(), m.e.isoformat()]] %}{% set m.s = s %}{% set m.e = e %}
             {% endif %}
           {% endfor %}
-          {# запасний варіант: найближчий майбутній timestamp-сенсор інтеграції ДТЕК («Початок наступного відключення») #}
-          {% if ns.s is none %}
-            {% for e in integration_entities('dtek_dnem') | select('match', 'sensor\\.') | select('is_state_attr', 'device_class', 'timestamp') %}
-              {% set t = as_datetime(states(e)) | as_local if as_datetime(states(e)) else none %}
-              {% if t and t > now() + timedelta(minutes=10) and (ns.s is none or t < ns.s) %}{% set ns.s = t %}{% endif %}
-            {% endfor %}
-          {% endif %}
+          {% if m.s is not none %}{% set m.out = m.out + [[m.s.isoformat(), m.e.isoformat()]] %}{% endif %}
+          {{ m.out }}
+        grid_on: "{{ states('sensor.delta_2_max_ac_in_volts') | float(0) > 180 }}"
+        # наступне відключення = перше, що ПОЧИНАЄТЬСЯ після «зараз». Слот, який іще йде, а світло вже дали
+        # раніше графіка, сюди не потрапляє. Timestamp-сенсори ДТЕК не беремо: «Кінець відключення» теж timestamp
+        # і давав кінець поточного слоту як «наступне відключення» (баг 13.11, 20:02 → «о 20:30»).
+        next_start: >-
+          {% set ns = namespace(s=none) %}
+          {% for c in chains %}
+            {% if ns.s is none and as_datetime(c[0]) > now() %}{% set ns.s = as_datetime(c[0]) %}{% endif %}
+          {% endfor %}
           {{ ns.s.isoformat() if ns.s is not none else '' }}
         planned_now: >-
           {% set ns = namespace(v=false) %}
@@ -151,7 +160,12 @@
           {%- macro dur(h) -%}{%- set m = (h * 60) | round(0) | int -%}{%- if m >= 60 -%}{{ m // 60 }} год {{ m % 60 }} хв{%- else -%}{{ m }} хв{%- endif -%}{%- endmacro -%}
           {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
           {%- if trigger.platform == 'numeric_state' and trigger.entity_id == 'sensor.delta_2_max_ac_in_volts' -%}
-          ⚡ Світло зникло о {{ hm(now() - timedelta(minutes=1)) }}{%- if planned_now and planned_start -%}
+          {%- set r = states.automation | selectattr('attributes.id', 'eq', 'ecoflow_power_restored') | first | default(none) -%}
+          {%- set again = planned_start != '' and r is not none and r.attributes.last_triggered is not none
+                and r.attributes.last_triggered > as_datetime(planned_start) and outage_end != '' -%}
+          ⚡ Світло зникло о {{ hm(now() - timedelta(minutes=1)) }}{%- if again -%}
+          {{ ' знову (за графіком ДТЕК відключення до ' ~ hm(as_datetime(outage_end)) ~ ')' }}
+          {%- elif planned_now and planned_start -%}
           {%- set dm = ((now() - timedelta(minutes=1) - as_datetime(planned_start)).total_seconds() / 60) | round(0) | int -%}
           {{ ' (за графіком ДТЕК з ' ~ hm(as_datetime(planned_start)) ~ (', на ' ~ dm ~ ' хв пізніше' if dm > 5 else (', на ' ~ (-dm) ~ ' хв раніше' if dm < -5 else '')) ~ ')' }}
           {%- elif planned_now -%}{{ ' (за графіком ДТЕК)' }}
@@ -286,19 +300,15 @@
       then: *get_cal
     - variables: *sched_vars
     - variables: &plan_vars
-        # майбутні відключення (злиті суміжні), [[start, end], ...]
+        # майбутні відключення: ще не скінчились; якщо світло зараз є — лише ті, що ще не почались
+        # (слот, у якому світло дали раніше, уже не розряджає EcoFlow)
         outages: >-
-          {% set m = namespace(out=[], s=none, e=none) %}
-          {% for x in evs %}
-            {% set s = as_datetime(x.start) %}{% set e = as_datetime(x.end) %}
-            {% if e > now() %}
-              {% if m.s is none %}{% set m.s = s %}{% set m.e = e %}
-              {% elif s <= m.e + timedelta(minutes=1) %}{% set m.e = [m.e, e] | max %}
-              {% else %}{% set m.out = m.out + [[m.s.isoformat(), m.e.isoformat()]] %}{% set m.s = s %}{% set m.e = e %}
-              {% endif %}
+          {% set m = namespace(out=[]) %}
+          {% for c in chains %}
+            {% if as_datetime(c[1]) > now() and not (grid_on and as_datetime(c[0]) <= now()) %}
+              {% set m.out = m.out + [c] %}
             {% endif %}
           {% endfor %}
-          {% if m.s is not none %}{% set m.out = m.out + [[m.s.isoformat(), m.e.isoformat()]] %}{% endif %}
           {{ m.out }}
         # симуляція: між відключеннями заряд P×eff до max_lvl, під час — витрата avg_out_w×loss до min_lvl.
         # need_p: 0 = поточного заряду вистачає; N = мінімальне налаштування заряду, з яким вистачить на всі; -1 = не вистачить навіть на максимумі
@@ -380,6 +390,18 @@
           {%- macro hm(t) -%}{%- set t = t | as_local -%}{{ t.strftime('%H:%M') if t.date() == now().date() else t.strftime('%d.%m %H:%M') }}{%- endmacro -%}
           {%- set on_at = now() - timedelta(minutes=3) -%}
           💡 Світло є з {{ hm(on_at) }}{% if off_since %} (не було {{ dur((on_at - as_datetime(off_since)).total_seconds() / 3600) }}){% endif %}.
+          {% set g = namespace(early=none, late=none) -%}
+          {%- for c in chains -%}
+            {%- set cs = as_datetime(c[0]) -%}{%- set ce = as_datetime(c[1]) -%}
+            {%- if cs <= on_at < ce -%}{%- set g.early = ce -%}
+            {%- elif ce <= on_at and (on_at - ce).total_seconds() <= 10800 and (not off_since or ce > as_datetime(off_since)) -%}{%- set g.late = ce -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- if g.early is not none and (g.early - on_at).total_seconds() > 300 -%}
+          🕗 За графіком ДТЕК світло мало бути о {{ hm(g.early) }}, а дали на {{ dur((g.early - on_at).total_seconds() / 3600) }} раніше: до {{ hm(g.early) }} можливі ще відключення.
+          {% elif g.early is none and g.late is not none and (on_at - g.late).total_seconds() > 300 -%}
+          🕗 За графіком ДТЕК світло мало бути о {{ hm(g.late) }}, дали на {{ dur((on_at - g.late).total_seconds() / 3600) }} пізніше.
+          {% endif -%}
           {% set need = [max_lvl - soc, 0] | max / 100 * full_wh -%}
           {%- set charge_w = in_w - out_w -%}
           🔋 EcoFlow {{ soc | round(0) | int }}%
@@ -405,7 +427,7 @@
           {%- endif -%}
           {%- endif -%}
           {%- else -%}
-          📅 Наступне відключення невідоме ({{ 'за графіком ДТЕК у найближчі 48 год його не видно' if dtek_cal != '' else 'графіка ДТЕК у HA ще нема' }}), тож чи встигне зарядитись, сказати не можу.
+          📅 {{ 'Наступних відключень у графіку ДТЕК поки нема.' if dtek_cal != '' else 'Графіка ДТЕК у HA нема, тож коли наступне відключення, невідомо.' }}
           {%- endif %}
           {% if plan_text and plan.need_p != 0 %}{{ plan_text }}{% endif %}
 
